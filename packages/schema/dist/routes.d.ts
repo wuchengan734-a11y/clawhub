@@ -25,4 +25,5 @@ export declare const ApiRoutes: {
     readonly souls: "/api/v1/souls";
     readonly users: "/api/v1/users";
     readonly whoami: "/api/v1/whoami";
+    readonly skillsExport: "/api/v1/skills/export";
 };

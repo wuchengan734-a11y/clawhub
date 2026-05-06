@@ -118,6 +118,51 @@ export async function requirePackagePublishAuth(
   return { kind: "user", user: auth.user, userId: auth.userId };
 }
 
+const EXPORT_ALLOWED_ROLES: string[] = ["admin", "moderator", "mirror"];
+
+/**
+ * Export 接口鉴权（方案留白）。
+ * 当前实现：如果提供了 Bearer token，则验证 token 并检查角色；
+ * 如果未提供 token，直接放行（便于开发阶段测试）。
+ * 后续可替换为强制鉴权。
+ */
+export async function requireExportAuth(
+  ctx: ActionCtx,
+  request: Request,
+): Promise<
+  | { ok: true; user: Doc<"users"> | null; userId: Doc<"users">["_id"] | null }
+  | { ok: false; response: Response }
+> {
+  const header = request.headers.get("authorization") ?? request.headers.get("Authorization");
+  if (!header) {
+    return { ok: true, user: null, userId: null };
+  }
+
+  try {
+    const { user, userId } = await requireApiTokenUser(ctx, request);
+
+    if (!user.role || !EXPORT_ALLOWED_ROLES.includes(user.role)) {
+      return {
+        ok: false,
+        response: new Response("Forbidden: export permission required", {
+          status: 403,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      };
+    }
+
+    return { ok: true, user, userId };
+  } catch (err) {
+    return {
+      ok: false,
+      response: new Response(
+        `Unauthorized: ${err instanceof Error ? err.message : "invalid token"}`,
+        { status: 401, headers: { "Content-Type": "text/plain" } },
+      ),
+    };
+  }
+}
+
 export function parseBearerToken(header: string | null) {
   if (!header) return null;
   const trimmed = header.trim();

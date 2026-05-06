@@ -51,3 +51,30 @@ export function buildDeterministicPackageZip(entries: ZipEntry[]) {
 
   return Uint8Array.from(zipSync(zipData, { level: 6 }));
 }
+
+export interface MergedExportManifestEntry {
+  slug: string;
+  version: string | null;
+  displayName: string;
+  createdAt: number;
+  updatedAt: number;
+  stats: Record<string, unknown> | null;
+  fileCount: number;
+}
+
+export function buildMergedExportZip(
+  entries: ZipEntry[],
+  manifest: MergedExportManifestEntry[],
+): Uint8Array {
+  const sorted = [...entries].sort((a, b) => a.path.localeCompare(b.path));
+  const zipData: ZipInput = {};
+
+  for (const entry of sorted) {
+    zipData[entry.path] = [entry.bytes, { mtime: FIXED_ZIP_DATE }];
+  }
+
+  const manifestJson = JSON.stringify(manifest, null, 2);
+  zipData["_manifest.json"] = [new TextEncoder().encode(manifestJson), { mtime: FIXED_ZIP_DATE }];
+
+  return Uint8Array.from(zipSync(zipData, { level: 6 }));
+}

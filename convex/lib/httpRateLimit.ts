@@ -8,6 +8,7 @@ export const RATE_LIMITS = {
   read: { ip: 180, key: 900 },
   write: { ip: 45, key: 180 },
   download: { ip: 30, key: 180 },
+  export: { ip: 5, key: 30 },
 } as const;
 
 type RateLimitResult = {
