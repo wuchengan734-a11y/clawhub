@@ -1524,6 +1524,110 @@ describe("skills anti-spam guards", () => {
     );
   });
 
+  it("does not let review guidance override an aggregate suspicious verdict", async () => {
+    const patch = vi.fn(async () => {});
+    const version = {
+      _id: "skillVersions:1",
+      skillId: "skills:1",
+      staticScan: {
+        status: "clean",
+        reasonCodes: [],
+        findings: [],
+        summary: "",
+        engineVersion: "v2.4.24",
+        checkedAt: Date.now(),
+      },
+      vtAnalysis: {
+        status: "suspicious",
+        engineStats: { malicious: 0, suspicious: 1, undetected: 64 },
+      },
+      llmAnalysis: {
+        status: "suspicious",
+        riskSummary: {
+          abnormal_behavior_control: {
+            status: "concern",
+            highestSeverity: "medium",
+            summary: "Needs review.",
+          },
+        },
+        checkedAt: Date.now(),
+      },
+    };
+    const skill = {
+      _id: "skills:1",
+      slug: "needs-review-and-vt",
+      ownerUserId: "users:owner",
+      moderationFlags: ["flagged.review"],
+      moderationReason: "scanner.llm.review",
+    };
+    const owner = {
+      _id: "users:owner",
+      role: "user",
+      _creationTime: Date.now() - 60 * 24 * 60 * 60 * 1000,
+      createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+      deletedAt: undefined,
+    };
+
+    const db = {
+      get: vi.fn(async (id: string) => {
+        if (id === "skills:1") return skill;
+        if (id === "users:owner") return owner;
+        return null;
+      }),
+      query: vi.fn((table: string) => {
+        const globalStatsQuery = buildGlobalStatsQuery(table);
+        if (globalStatsQuery) return globalStatsQuery;
+        const digestQuery = buildDigestQuery(table);
+        if (digestQuery) return digestQuery;
+        if (table === "skillVersions") {
+          return {
+            withIndex: () => ({
+              unique: async () => version,
+            }),
+          };
+        }
+        if (table === "skills") {
+          return {
+            withIndex: (name: string) => {
+              if (name === "by_owner") {
+                return {
+                  order: () => ({
+                    take: async () => [],
+                  }),
+                };
+              }
+              throw new Error(`unexpected skills index ${name}`);
+            },
+          };
+        }
+        throw new Error(`unexpected table ${table}`);
+      }),
+      patch,
+      insert: vi.fn(),
+      normalizeId: vi.fn(),
+    };
+
+    await approveSkillByHashHandler(
+      { db, scheduler: { runAfter: vi.fn() } } as never,
+      {
+        sha256hash: "h".repeat(64),
+        scanner: "llm",
+        status: "suspicious",
+      } as never,
+    );
+
+    expect(patch).toHaveBeenCalledWith(
+      "skills:1",
+      expect.objectContaining({
+        moderationVerdict: "suspicious",
+        moderationReason: "scanner.llm.suspicious",
+        moderationFlags: ["flagged.suspicious"],
+        moderationReasonCodes: ["review.llm_review", "suspicious.vt_suspicious"],
+        isSuspicious: true,
+      }),
+    );
+  });
+
   it("keeps skills hidden when aggregate verdict remains malicious after a clean scanner update", async () => {
     const patch = vi.fn(async () => {});
     const version = {

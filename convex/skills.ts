@@ -344,12 +344,14 @@ function buildScannerModerationPatchFromVersion(params: {
     ? sourceReasonCodes.filter((code) => !code.startsWith("suspicious."))
     : sourceReasonCodes;
   const moderationVerdict = verdictFromCodes(moderationReasonCodes);
-  const moderationFlags = hasReviewReasonCode(moderationReasonCodes)
+  const isReviewOnlyVerdict =
+    moderationVerdict === "clean" && hasReviewReasonCode(moderationReasonCodes);
+  const moderationFlags = isReviewOnlyVerdict
     ? ["flagged.review"]
     : legacyFlagsFromVerdict(moderationVerdict);
   const moderationReason = bypassSuspicious
     ? normalizeScannerSuspiciousReason(sourceReason)
-    : moderationReasonCodes.includes("review.llm_review")
+    : isReviewOnlyVerdict
       ? "scanner.llm.review"
       : sourceReason;
   const moderationStatus = moderationVerdict === "malicious" ? "hidden" : "active";
@@ -5852,12 +5854,14 @@ export const escalateSkillByIdInternal = internalMutation({
       ? sourceReasonCodes.filter((code) => !code.startsWith("suspicious."))
       : sourceReasonCodes;
     const moderationVerdict = verdictFromCodes(moderationReasonCodes);
-    const moderationFlags = hasReviewReasonCode(moderationReasonCodes)
+    const isReviewOnlyVerdict =
+      moderationVerdict === "clean" && hasReviewReasonCode(moderationReasonCodes);
+    const moderationFlags = isReviewOnlyVerdict
       ? ["flagged.review"]
       : legacyFlagsFromVerdict(moderationVerdict);
     const moderationReason = bypassSuspicious
       ? normalizeScannerSuspiciousReason(sourceReason)
-      : hasReviewReasonCode(moderationReasonCodes)
+      : isReviewOnlyVerdict
         ? "scanner.llm.review"
         : sourceReason;
     const moderationStatus = moderationVerdict === "malicious" ? "hidden" : args.moderationStatus;
@@ -6635,12 +6639,13 @@ export const approveSkillByHashInternal = internalMutation({
           : snapshot.reasonCodes;
       const nextVerdict = verdictFromCodes(nextReasonCodes);
       const nextLegacyFlags = legacyFlagsFromVerdict(nextVerdict);
+      const isReviewOnlyVerdict = nextVerdict === "clean" && hasReviewReasonCode(nextReasonCodes);
       if (nextVerdict === "clean" && !alreadyBlocked) {
-        newFlags = hasReviewReasonCode(nextReasonCodes) ? ["flagged.review"] : undefined;
+        newFlags = isReviewOnlyVerdict ? ["flagged.review"] : undefined;
       }
       const nextModerationReason = qualityLocked
         ? "quality.low"
-        : hasReviewReasonCode(nextReasonCodes)
+        : isReviewOnlyVerdict
           ? "scanner.llm.review"
           : bypassSuspicious
             ? `scanner.${args.scanner}.clean`
@@ -6749,8 +6754,9 @@ export const escalateByVtInternal = internalMutation({
         : snapshot.reasonCodes;
     const nextVerdict = verdictFromCodes(nextReasonCodes);
     const nextLegacyFlags = legacyFlagsFromVerdict(nextVerdict);
+    const isReviewOnlyVerdict = nextVerdict === "clean" && hasReviewReasonCode(nextReasonCodes);
     const nextModerationFlags =
-      hasReviewReasonCode(nextReasonCodes) && !alreadyBlocked
+      isReviewOnlyVerdict && !alreadyBlocked
         ? ["flagged.review"]
         : nextVerdict === "clean" && !alreadyBlocked
           ? undefined
@@ -6773,7 +6779,7 @@ export const escalateByVtInternal = internalMutation({
       basePatch.moderationReason = normalizeScannerSuspiciousReason(
         skill.moderationReason as string | undefined,
       );
-    } else if (hasReviewReasonCode(nextReasonCodes) && !alreadyBlocked) {
+    } else if (isReviewOnlyVerdict && !alreadyBlocked) {
       basePatch.moderationReason = "scanner.llm.review";
     } else if (nextVerdict === "clean" && !alreadyBlocked) {
       const existingReason = skill.moderationReason as string | undefined;
