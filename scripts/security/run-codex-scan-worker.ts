@@ -214,6 +214,7 @@ async function runCodex(job: ClaimedJob, workspace: string) {
     process.env.CODEX_SECURITY_SCAN_MODEL ?? "gpt-5.5",
     "--sandbox",
     "read-only",
+    "--skip-git-repo-check",
     "-c",
     "approval_policy=never",
     "-c",
@@ -272,6 +273,7 @@ async function processJob(client: ConvexHttpClient, token: string, job: ClaimedJ
       runId: process.env.GITHUB_RUN_ID,
     });
     console.log(`completed ${job.job._id}: ${llmAnalysis.status}`);
+    return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await client.action(api.securityScan.failCodexScanJob, {
@@ -281,6 +283,7 @@ async function processJob(client: ConvexHttpClient, token: string, job: ClaimedJ
       error: message,
     });
     console.error(`failed ${job.job._id}: ${message}`);
+    return false;
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -299,7 +302,10 @@ async function main() {
     limit,
   })) as ClaimedJob[];
   console.log(`claimed ${jobs.length} job(s)`);
-  await Promise.all(jobs.map((job) => processJob(client, token, job)));
+  const results = await Promise.all(jobs.map((job) => processJob(client, token, job)));
+  if (results.some((ok) => !ok)) {
+    process.exitCode = 1;
+  }
 }
 
 await main();
