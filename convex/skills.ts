@@ -10395,8 +10395,8 @@ export const listByDateRange = internalQuery({
     const decodedCursor = args.cursor
       ? decodePublicListCursor({
           cursor: args.cursor,
-          indexName: "by_active_created",
-          maxIndexKeyLength: 4,
+          indexName: "by_active_updated",
+          maxIndexKeyLength: 2,
           eqPrefix: [undefined],
         })
       : null;
@@ -10410,7 +10410,7 @@ export const listByDateRange = internalQuery({
 
     const result = await getPage(ctx, {
       table: "skillSearchDigest",
-      index: "by_active_created",
+      index: "by_active_updated",
       startIndexKey,
       startInclusive: isFirstPage,
       endIndexKey,
@@ -10423,15 +10423,24 @@ export const listByDateRange = internalQuery({
     let nextCursor: string | null = null;
     if (result.hasMore && result.indexKeys.length > 0) {
       nextCursor = encodeIndexKey(
-        "by_active_created",
+        "by_active_updated",
         result.indexKeys[result.indexKeys.length - 1],
       );
     }
 
     return {
-      page: result.page,
+      page: result.page.filter(isExportableSkillDigest),
       nextCursor,
       hasMore: result.hasMore,
     };
   },
 });
+
+function isExportableSkillDigest(
+  skill: Pick<
+    Doc<"skillSearchDigest">,
+    "latestVersionId" | "softDeletedAt" | "moderationStatus" | "moderationFlags"
+  >,
+) {
+  return Boolean(skill.latestVersionId) && isPublicSkillDoc(skill);
+}

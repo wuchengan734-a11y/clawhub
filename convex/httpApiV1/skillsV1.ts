@@ -10,15 +10,21 @@ import {
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 import type { ActionCtx } from "../_generated/server";
-import { getOptionalApiTokenUserId, requireApiTokenUser, requireExportAuth } from "../lib/apiTokenAuth";
+import { getOptionalApiTokenUserId, requireApiTokenUser } from "../lib/apiTokenAuth";
+import { mergeHeaders } from "../lib/httpHeaders";
 import { applyRateLimit } from "../lib/httpRateLimit";
-import { buildMergedExportZip, type MergedExportManifestEntry, validateSlug, validateFilePath } from "../lib/skillZip";
 import { parseBooleanQueryParam, resolveBooleanQueryParam } from "../lib/httpUtils";
 import type {
   LlmAgenticRiskFinding,
   LlmEvalDimension,
   LlmRiskSummary,
 } from "../lib/securityPrompt";
+import {
+  buildMergedExportZip,
+  type MergedExportManifestEntry,
+  validateSlug,
+  validateFilePath,
+} from "../lib/skillZip";
 import { publishVersionForUser } from "../skills";
 import {
   MAX_RAW_FILE_BYTES,
@@ -35,6 +41,9 @@ import {
   text,
   toOptionalNumber,
 } from "./shared";
+
+const MAX_EXPORT_FILE_COUNT = 10_000;
+const MAX_EXPORT_TOTAL_BYTES = 256 * 1024 * 1024;
 
 type SearchSkillEntry = {
   score: number;
@@ -1568,8 +1577,11 @@ async function chunkedParallel<T, R>(
 }
 
 export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
-  const auth = await requireExportAuth(ctx, request);
-  if (!auth.ok) return auth.response;
+  try {
+    await requireApiTokenUser(ctx, request);
+  } catch (err) {
+    return text(err instanceof Error ? err.message : "Unauthorized", 401);
+  }
 
   const rate = await applyRateLimit(ctx, request, "export");
   if (!rate.ok) return rate.response;
@@ -1602,6 +1614,7 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
       createdAt: number;
       updatedAt: number;
       stats?: Record<string, unknown> | null;
+      ownerUserId: Id<"users">;
       ownerHandle?: string | null;
       ownerDisplayName?: string | null;
     }>;
@@ -1626,29 +1639,25 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
     const emptyZip = buildMergedExportZip([], []);
     return new Response(emptyZip as unknown as BodyInit, {
       status: 200,
-      headers: {
-        ...rate.headers,
+      headers: mergeHeaders(rate.headers, {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="skills-export-${startDate}-${endDate}-empty.zip"`,
-        "X-Next-Cursor": "",
-        "X-Has-More": "false",
+        "X-Next-Cursor": result.nextCursor ?? "",
+        "X-Has-More": String(result.hasMore),
         "X-Total-Returned": "0",
         "X-Date-Range": `${startDate}-${endDate}`,
-      },
+      }),
     });
   }
 
   const exportErrors: Array<{ slug: string; error: string }> = [];
 
-  const versionDocs = await chunkedParallel(
-    result.page,
-    100,
-    (digest) =>
-      digest.latestVersionId
-        ? ctx.runQuery(internal.skills.getVersionByIdInternal, {
-            versionId: digest.latestVersionId,
-          })
-        : Promise.resolve(null),
+  const versionDocs = await chunkedParallel(result.page, 100, (digest) =>
+    digest.latestVersionId
+      ? ctx.runQuery(internal.skills.getVersionByIdInternal, {
+          versionId: digest.latestVersionId,
+        })
+      : Promise.resolve(null),
   );
 
   type BlobTask = { digestIndex: number; fileIndex: number; storageId: Id<"_storage"> };
@@ -1656,7 +1665,9 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
 
   for (let i = 0; i < result.page.length; i++) {
     const digest = result.page[i];
-    const version = versionDocs[i] as { files?: Array<{ storageId: Id<"_storage">; path: string }> } | null;
+    const version = versionDocs[i] as {
+      files?: Array<{ storageId: Id<"_storage">; path: string }>;
+    } | null;
 
     if (!version) {
       exportErrors.push({
@@ -1682,6 +1693,13 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
     }
 
     for (let j = 0; j < version.files.length; j++) {
+      if (blobTasks.length >= MAX_EXPORT_FILE_COUNT) {
+        exportErrors.push({
+          slug: digest.slug,
+          error: `file count cap exceeded (${MAX_EXPORT_FILE_COUNT})`,
+        });
+        break;
+      }
       blobTasks.push({
         digestIndex: i,
         fileIndex: j,
@@ -1694,6 +1712,7 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
 
   const zipEntries: Array<{ path: string; bytes: Uint8Array }> = [];
   const manifest: MergedExportManifestEntry[] = [];
+  let totalExportBytes = 0;
 
   const blobsByDigest = new Map<number, Map<number, Blob | null>>();
   for (let k = 0; k < blobTasks.length; k++) {
@@ -1713,6 +1732,15 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
     if (!version?.files) continue;
     if (!validateSlug(digest.slug)) continue;
 
+    const publisherSegment = getExportPublisherSegment(digest);
+    if (!publisherSegment) {
+      exportErrors.push({
+        slug: digest.slug,
+        error: "invalid publisher path segment (fails Zip Slip validation)",
+      });
+      continue;
+    }
+    const exportRoot = `${publisherSegment}/${digest.slug}`;
     const digestBlobs = blobsByDigest.get(i);
     if (!digestBlobs) continue;
 
@@ -1738,7 +1766,15 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
       }
 
       const buffer = new Uint8Array(await blob.arrayBuffer());
-      zipEntries.push({ path: `${digest.slug}/${filePath}`, bytes: buffer });
+      if (totalExportBytes + buffer.byteLength > MAX_EXPORT_TOTAL_BYTES) {
+        exportErrors.push({
+          slug: digest.slug,
+          error: `byte cap exceeded (${MAX_EXPORT_TOTAL_BYTES}) at file "${filePath}"`,
+        });
+        continue;
+      }
+      totalExportBytes += buffer.byteLength;
+      zipEntries.push({ path: `${exportRoot}/${filePath}`, bytes: buffer });
       fileCount++;
     }
 
@@ -1755,11 +1791,12 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
       },
     };
     zipEntries.push({
-      path: `${digest.slug}/_export_skill_meta.json`,
+      path: `${exportRoot}/_export_skill_meta.json`,
       bytes: new TextEncoder().encode(JSON.stringify(skillMeta, null, 2)),
     });
 
     manifest.push({
+      publisher: publisherSegment,
       slug: digest.slug,
       version: version.version ?? null,
       displayName: digest.displayName,
@@ -1781,8 +1818,7 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
 
   return new Response(zipBytes as unknown as BodyInit, {
     status: 200,
-    headers: {
-      ...rate.headers,
+    headers: mergeHeaders(rate.headers, {
       "Content-Type": "application/zip",
       "Content-Disposition": `attachment; filename="skills-export-${startDate}-${endDate}.zip"`,
       "X-Next-Cursor": result.nextCursor ?? "",
@@ -1790,6 +1826,16 @@ export async function exportSkillsV1Handler(ctx: ActionCtx, request: Request) {
       "X-Total-Returned": String(manifest.length),
       "X-Date-Range": `${startDate}-${endDate}`,
       "X-Export-Errors": String(exportErrors.length),
-    },
+    }),
   });
+}
+
+function getExportPublisherSegment(digest: {
+  ownerHandle?: string | null;
+  ownerUserId: Id<"users">;
+}) {
+  const ownerHandle = digest.ownerHandle?.trim();
+  if (ownerHandle && validateSlug(ownerHandle)) return ownerHandle;
+  const fallback = String(digest.ownerUserId).replace(/[^a-zA-Z0-9._-]/g, "-");
+  return validateSlug(fallback) ? fallback : null;
 }

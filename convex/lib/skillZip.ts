@@ -79,6 +79,7 @@ export function buildDeterministicPackageZip(entries: ZipEntry[]) {
 }
 
 export interface MergedExportManifestEntry {
+  publisher: string;
   slug: string;
   version: string | null;
   displayName: string;
@@ -107,9 +108,7 @@ export function buildMergedExportZip(
 
   const manifestPath = "_manifest.json";
   if (seenPaths.has(manifestPath)) {
-    throw new Error(
-      `Duplicate ZIP path detected: "${manifestPath}" (conflicts with manifest)`,
-    );
+    throw new Error(`Duplicate ZIP path detected: "${manifestPath}" (conflicts with manifest)`);
   }
 
   const manifestJson = JSON.stringify(manifest, null, 2);
